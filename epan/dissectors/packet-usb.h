@@ -118,6 +118,31 @@ typedef struct _usb_tap_data_t {
     usb_trans_info_t *trans_info;
 } usb_tap_data_t;
 
+typedef struct {
+    guint8 device;
+    guint8 endpoint;
+} usbll_address_t;
+
+typedef enum {
+    HOST_TO_DEVICE = 0,
+    DEVICE_TO_HOST = 1
+} usbll_direction_t;
+
+typedef enum {
+    IN,
+    OUT,
+    SETUP,
+    PING,
+    SPLIT,
+    NONE
+} usbll_trans_type_t;
+
+typedef struct _usbll_data_t {
+    usbll_address_t address;
+    usbll_trans_type_t type;
+    usbll_direction_t packet_direction;
+    gboolean split;
+} usbll_data_t;
 
 /* the value for "no endpoint" that's used usb_addr_t, e.g. for the address of the host */
 #define NO_ENDPOINT  0xffffffff
