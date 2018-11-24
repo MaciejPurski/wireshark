@@ -20,6 +20,44 @@
 #include "packet-adb_service.h"
 #include "packet-usb.h"
 
+/* from Android's source adb/usb_vendors.c */
+#define VENDOR_ID_GOOGLE        0x18d1
+// HTC's USB Vendor ID
+#define VENDOR_ID_HTC           0x0bb4
+// Samsung's USB Vendor ID
+#define VENDOR_ID_SAMSUNG       0x04e8
+// Motorola's USB Vendor ID
+#define VENDOR_ID_MOTOROLA      0x22b8
+// LG's USB Vendor ID
+#define VENDOR_ID_LGE           0x1004
+// Huawei's USB Vendor ID
+#define VENDOR_ID_HUAWEI        0x12D1
+// Acer's USB Vendor ID
+#define VENDOR_ID_ACER          0x0502
+// Sony Ericsson's USB Vendor ID
+#define VENDOR_ID_SONY_ERICSSON 0x0FCE
+// Foxconn's USB Vendor ID
+#define VENDOR_ID_FOXCONN       0x0489
+// Dell's USB Vendor ID
+#define VENDOR_ID_DELL          0x413c
+// Nvidia's USB Vendor ID
+#define VENDOR_ID_NVIDIA        0x0955
+// Garmin-Asus's USB Vendor ID
+#define VENDOR_ID_GARMIN_ASUS   0x091E
+// Sharp's USB Vendor ID
+#define VENDOR_ID_SHARP         0x04dd
+// ZTE's USB Vendor ID
+#define VENDOR_ID_ZTE           0x19D2
+// Kyocera's USB Vendor ID
+#define VENDOR_ID_KYOCERA       0x0482
+// Pantech's USB Vendor ID
+#define VENDOR_ID_PANTECH       0x10A9
+// Qualcomm's USB Vendor ID
+#define VENDOR_ID_QUALCOMM      0x05c6
+
+#define IF_SUBCLASS_ADB         0x42
+#define IF_PROTOCOL_ADB         0x1
+
 static int proto_adb                                                       = -1;
 static int hf_command                                                      = -1;
 static int hf_argument_0                                                   = -1;
@@ -57,6 +95,26 @@ static expert_field ei_invalid_data                                   = EI_INIT;
 
 static dissector_handle_t  adb_handle;
 static dissector_handle_t  adb_service_handle;
+
+static const guint16 adb_vendors[] = {
+        VENDOR_ID_GOOGLE,
+        VENDOR_ID_HTC,
+        VENDOR_ID_SAMSUNG,
+        VENDOR_ID_MOTOROLA,
+        VENDOR_ID_LGE,
+        VENDOR_ID_HUAWEI,
+        VENDOR_ID_ACER,
+        VENDOR_ID_SONY_ERICSSON,
+        VENDOR_ID_FOXCONN,
+        VENDOR_ID_DELL,
+        VENDOR_ID_NVIDIA,
+        VENDOR_ID_GARMIN_ASUS,
+        VENDOR_ID_SHARP,
+        VENDOR_ID_ZTE,
+        VENDOR_ID_KYOCERA,
+        VENDOR_ID_PANTECH,
+        VENDOR_ID_QUALCOMM
+};
 
 static gint proto_tcp = -1;
 static gint proto_usb = -1;
@@ -751,6 +809,28 @@ dissect_adb(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data)
     return offset;
 }
 
+static gboolean
+heur_dissect_adb(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data)
+{
+    guint8 i;
+    usb_conv_info_t *usb_conv_info = (usb_conv_info_t *) data;
+    DISSECTOR_ASSERT(usb_conv_info);
+
+    for (i = 0; i < sizeof(adb_vendors) / sizeof(guint16); i++) {
+        if (usb_conv_info->deviceVendor == adb_vendors[i]) {
+            if (usb_conv_info->interfaceClass == IF_CLASS_VENDOR_SPECIFIC &&
+                usb_conv_info->interfaceSubclass == IF_SUBCLASS_ADB &&
+                usb_conv_info->interfaceProtocol == IF_PROTOCOL_ADB) {
+                    dissect_adb(tvb, pinfo, tree, data);
+                    return TRUE;
+                }
+            return FALSE;
+        }
+    }
+
+    return FALSE;
+}
+
 void
 proto_register_adb(void)
 {
@@ -915,6 +995,8 @@ proto_reg_handoff_adb(void)
     dissector_add_for_decode_as("usb.device",   adb_handle);
     dissector_add_for_decode_as("usb.product",  adb_handle);
     dissector_add_for_decode_as("usb.protocol", adb_handle);
+
+    heur_dissector_add("usb.bulk", heur_dissect_adb, "ADB USB bulk endpoint", "adb_usb_bulk", proto_adb, HEURISTIC_ENABLE);
 
     proto_tcp = proto_get_id_by_filter_name("tcp");
     proto_usb = proto_get_id_by_filter_name("usb");
