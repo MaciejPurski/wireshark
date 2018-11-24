@@ -1557,7 +1557,7 @@ static int usb_addr_to_str(const address* addr, gchar *buf, int buf_len _U_)
     } else {
         if (pletoh16(&addrp[8]) == 0)
             g_snprintf(buf, buf_len, "%d.%d", pletoh32(&addrp[0]),
-                        pletoh32(&addrp[4]));
+                        pletoh32(&addrp[4]) & 0x7f);
         else
             g_snprintf(buf, buf_len, "%d.%d.%d", pletoh16(&addrp[8]),
                             pletoh32(&addrp[0]), pletoh32(&addrp[4]));
@@ -4938,8 +4938,12 @@ dissect_usb_common(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent,
         usbll_data_ptr = (usbll_data_t *) p_get_proto_data(wmem_file_scope(), pinfo,
                                                        proto_usbll,
                                                        pinfo->num);
-        // TODO: OR with direction
-        endpoint = usbll_data_ptr->address.endpoint;
+        // TODO: do the same with other dissectors
+        if (usbll_data_ptr->address.endpoint == 0)
+            endpoint = usbll_data_ptr->address.endpoint;
+        else
+            endpoint = usbll_data_ptr->address.endpoint | (usbll_data_ptr->packet_direction << 7);
+
         device_address = (guint16) usbll_data_ptr->address.device;
         bus_id = 0;
         urb_type = (usbll_data_ptr->packet_direction == HOST_TO_DEVICE) ? URB_SUBMIT : URB_COMPLETE;
