@@ -92,6 +92,11 @@ typedef struct _usb_endpoint_info_t {
     guint32 max_packet_size;
 } usb_endpoint_info_t;
 
+typedef struct _usb_string_desc_req_t {
+    guint8 index;
+    usb_conv_info_t *interface_conv;
+} usb_string_desc_req_t;
+
 /* Conversation Structure
  * there is one such structure for each device/endpoint conversation */
 struct _usb_conv_info_t {
@@ -103,6 +108,10 @@ struct _usb_conv_info_t {
     guint32  device_protocol;
     gboolean is_request;
     gboolean is_setup;
+    wmem_array_t *string_desc_reqs; /* Valid only during Control
+                                          transfers. We will try to save
+                                          those descriptors in
+                                          GET_DESCRIPTOR (STRING) responses */
 
     guint32 max_packet_size;
 
@@ -112,6 +121,7 @@ struct _usb_conv_info_t {
     guint16 interfaceSubclass;  /* Interface Descriptor - subclass       */
     guint16 interfaceProtocol;  /* Interface Descriptor - protocol       */
     guint8  interfaceNum;       /* Most recent interface number          */
+    gchar *string_desc;
     wmem_array_t *endpoints;
 
     guint16 deviceVendor;       /* Device    Descriptor - USB Vendor  ID */

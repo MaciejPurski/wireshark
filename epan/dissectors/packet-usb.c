@@ -1675,7 +1675,8 @@ get_usb_conv_info(conversation_t *conversation)
         usb_conv_info->alt_settings      = wmem_array_new(wmem_file_scope(), sizeof(usb_alt_setting_t));
         usb_conv_info->transactions      = wmem_tree_new(wmem_file_scope());
         usb_conv_info->endpoints         = wmem_array_new(wmem_file_scope(), sizeof(usb_endpoint_info_t));
-
+        usb_conv_info->string_desc       = NULL;
+        usb_conv_info->string_desc_reqs       = wmem_array_new(wmem_file_scope(), sizeof(usb_string_desc_req_t));
         conversation_add_proto_data(conversation, proto_usb, usb_conv_info);
     }
 
@@ -2157,8 +2158,24 @@ dissect_usb_string_descriptor(packet_info *pinfo _U_, proto_tree *parent_tree,
     guint8      len;
     proto_item *len_item;
     usb_trans_info_t *usb_trans_info;
+    /* Conversation asociated with the interface, whose string descriptor we're requesting */
+    usb_conv_info_t *interface_conv_info = NULL;
+    guint8 i;
+    guint8 count = wmem_array_get_count(usb_conv_info->string_desc_reqs);
 
     usb_trans_info = usb_conv_info->usb_trans_info;
+    /* Find the interface's conversation suiting this string descriptor */
+    for (i = 0; i < count; i++) {
+        usb_string_desc_req_t *string_desc = (usb_string_desc_req_t *) wmem_array_index(usb_conv_info->string_desc_reqs,
+                                                                          i);
+
+        guint8 index = string_desc->index;
+        if (string_desc->index == usb_trans_info->u.get_descriptor.usb_index) {
+            interface_conv_info = string_desc->interface_conv;
+            break;
+        }
+    }
+    
     tree = proto_tree_add_subtree(parent_tree, tvb, offset, -1, ett_descriptor_device, &item, "STRING DESCRIPTOR");
 
     len = tvb_get_guint8(tvb, offset);
@@ -2194,6 +2211,10 @@ dissect_usb_string_descriptor(packet_info *pinfo _U_, proto_tree *parent_tree,
         /* handle case of host requesting only substring */
         guint8 len_str = MIN(len-2, usb_trans_info->setup.wLength -2);
         proto_tree_add_item(tree, hf_usb_bString, tvb, offset, len_str, ENC_UTF_16 | ENC_LITTLE_ENDIAN);
+        if (interface_conv_info != NULL) {
+            interface_conv_info->string_desc = tvb_get_string_enc(wmem_file_scope(), tvb, offset, len_str, ENC_UTF_16 | ENC_LITTLE_ENDIAN);
+        }
+
         offset += len_str;
     }
 
@@ -2217,6 +2238,7 @@ dissect_usb_interface_descriptor(packet_info *pinfo, proto_tree *parent_tree,
     guint8            len;
     guint8            interface_num;
     guint8            alt_setting;
+    guint8            string_index;
     usb_trans_info_t *usb_trans_info;
 
     usb_trans_info = usb_conv_info->usb_trans_info;
@@ -2339,6 +2361,16 @@ dissect_usb_interface_descriptor(packet_info *pinfo, proto_tree *parent_tree,
     offset += 1;
 
     /* iInterface */
+    string_index = tvb_get_guint8(tvb, offset);
+
+    if (string_index != 0) {
+        usb_string_desc_req_t *string_desc_req = (usb_string_desc_req_t *) wmem_alloc(wmem_file_scope(),
+                                                            sizeof(usb_string_desc_req_t));
+        string_desc_req->index = string_index;
+        string_desc_req->interface_conv = usb_trans_info->interface_info;
+        wmem_array_append(usb_conv_info->string_desc_reqs, (void *) string_desc_req, 1);
+    }
+
     proto_tree_add_item(tree, hf_usb_iInterface, tvb, offset, 1, ENC_LITTLE_ENDIAN);
     offset += 1;
 
