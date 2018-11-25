@@ -1674,7 +1674,7 @@ get_usb_conv_info(conversation_t *conversation)
         usb_conv_info->deviceProduct     = DEV_PRODUCT_UNKNOWN;
         usb_conv_info->alt_settings      = wmem_array_new(wmem_file_scope(), sizeof(usb_alt_setting_t));
         usb_conv_info->transactions      = wmem_tree_new(wmem_file_scope());
-        usb_conv_info->max_packet_size   = 64;
+        usb_conv_info->endpoints         = wmem_array_new(wmem_file_scope(), sizeof(usb_endpoint_info_t));
 
         conversation_add_proto_data(conversation, proto_usb, usb_conv_info);
     }
@@ -2400,7 +2400,8 @@ dissect_usb_endpoint_descriptor(packet_info *pinfo, proto_tree *parent_tree,
     dissect_usb_descriptor_header(tree, tvb, offset, NULL);
     offset += 2;
 
-    endpoint = tvb_get_guint8(tvb, offset)&0x0f;
+    /* TODO: endpoint & with dir */
+    endpoint = tvb_get_guint8(tvb, offset);
     dissect_usb_endpoint_address(tree, tvb, offset);
     offset += 1;
 
@@ -2419,8 +2420,6 @@ dissect_usb_endpoint_descriptor(packet_info *pinfo, proto_tree *parent_tree,
             address tmp_addr;
             usb_address_t *usb_addr = wmem_new0(wmem_packet_scope(), usb_address_t);
 
-            printf("dupa2\n");
-
             /* packet is sent from a USB device's endpoint 0 to the host
              * replace endpoint 0 with the endpoint of this descriptor
              * and find the corresponding conversation
@@ -2433,11 +2432,15 @@ dissect_usb_endpoint_descriptor(packet_info *pinfo, proto_tree *parent_tree,
         }
         if (conversation) {
             usb_trans_info->interface_info->endpoint = endpoint;
-            usb_trans_info->interface_info->ep_type = ENDPOINT_TYPE(tvb_get_guint8(tvb, offset));
-            usb_trans_info->interface_info->max_packet_size = tvb_get_guint16(tvb, offset + 1, ENC_LITTLE_ENDIAN);
-            printf("DESCRIPTOR DISSECTION Endpoint: %d transfer type: %d MAX PACKET SIZE: %d\n", endpoint,
-                   usb_trans_info->interface_info->ep_type,
-                   usb_trans_info->interface_info->max_packet_size);
+            usb_endpoint_info_t *endpoint_desc = wmem_new(wmem_file_scope(), usb_endpoint_info_t);
+            endpoint_desc->index = endpoint;
+            endpoint_desc->type = ENDPOINT_TYPE(tvb_get_guint8(tvb, offset));
+            endpoint_desc->max_packet_size = tvb_get_guint16(tvb, offset + 1, ENC_LITTLE_ENDIAN);
+            wmem_array_append(usb_trans_info->interface_info->endpoints, endpoint_desc, 1);
+            // usb_trans_info->interface_info->ep_type = ENDPOINT_TYPE(tvb_get_guint8(tvb, offset));
+            // printf("DESCRIPTOR DISSECTION Endpoint: %d transfer type: %d MAX PACKET SIZE: %d\n", endpoint,
+            //        usb_trans_info->interface_info->ep_type,
+            //        usb_trans_info->interface_info->max_packet_size);
 
             conversation_add_proto_data(conversation, proto_usb, usb_trans_info->interface_info);
         }
@@ -4841,14 +4844,30 @@ dissect_transfer_info(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, usbll
 {
         if (usbll_data_ptr->address.endpoint == 0) {
             usb_conv_info->transfer_type = URB_CONTROL;
+            usb_conv_info->endpoint = usbll_data_ptr->address.endpoint;
         } else {
-            usb_conv_info->transfer_type = usb_ep_type_to_transfer(usb_conv_info->ep_type);
+            guint32 i, count = wmem_array_get_count(usb_conv_info->endpoints);
+
+            usb_conv_info->endpoint = usbll_data_ptr->address.endpoint |
+                                      (usbll_data_ptr->packet_direction << 7);
+            usb_conv_info->transfer_type = URB_UNKNOWN;
+
+            for (i = 0; i < count; i++) {
+                usb_endpoint_info_t *endpoint = (usb_endpoint_info_t *)wmem_array_index(usb_conv_info->endpoints, i);
+
+                if (endpoint->index == usb_conv_info->endpoint) {
+                    usb_conv_info->transfer_type = usb_ep_type_to_transfer(endpoint->type);
+                    usb_conv_info->max_packet_size = endpoint->max_packet_size;
+
+                    break;
+                }
+            }
+
         }
 
         usb_conv_info->is_setup = (usbll_data_ptr->type == SETUP);
         usb_conv_info->is_request = (usbll_data_ptr->packet_direction == HOST_TO_DEVICE);
 
-        usb_conv_info->endpoint = usbll_data_ptr->address.endpoint;
         usb_conv_info->direction = usbll_data_ptr->packet_direction;
         usb_conv_info->device_address = usbll_data_ptr->address.device;
 
@@ -4967,7 +4986,6 @@ dissect_usb_common(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent,
     conversation = get_usb_conversation(pinfo, &pinfo->src, &pinfo->dst, pinfo->srcport, pinfo->destport);
     usb_conv_info = get_usb_conv_info(conversation);
     clear_usb_conv_tmp_data(usb_conv_info);
-
 
     switch (header_type) {
 

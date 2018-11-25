@@ -86,6 +86,12 @@ typedef struct _usb_trans_info_t {
 
 enum usb_conv_class_data_type {USB_CONV_UNKNOWN = 0, USB_CONV_U3V, USB_CONV_AUDIO, USB_CONV_VIDEO, USB_CONV_MASS_STORAGE};
 
+typedef struct _usb_endpoint_info_t {
+    guint8 index;
+    guint8 type;
+    guint32 max_packet_size;
+} usb_endpoint_info_t;
+
 /* Conversation Structure
  * there is one such structure for each device/endpoint conversation */
 struct _usb_conv_info_t {
@@ -94,7 +100,6 @@ struct _usb_conv_info_t {
     guint8   endpoint;
     gint     direction;
     guint8   transfer_type;
-    guint8   ep_type;
     guint32  device_protocol;
     gboolean is_request;
     gboolean is_setup;
@@ -107,6 +112,7 @@ struct _usb_conv_info_t {
     guint16 interfaceSubclass;  /* Interface Descriptor - subclass       */
     guint16 interfaceProtocol;  /* Interface Descriptor - protocol       */
     guint8  interfaceNum;       /* Most recent interface number          */
+    wmem_array_t *endpoints;
 
     guint16 deviceVendor;       /* Device    Descriptor - USB Vendor  ID */
     guint32 deviceProduct;      /* Device    Descriptor - USB Product ID - MSBs only for encoding unknown */
