@@ -26,6 +26,8 @@
 #include <epan/decode_as.h>
 #include <epan/proto_data.h>
 #include <wsutil/pint.h>
+#include <epan/reassemble.h>
+#include <stdio.h>
 
 #include "packet-usb.h"
 #include "packet-mausb.h"
@@ -290,6 +292,16 @@ static int hf_usbport_keyword_diagnostic = -1;
 static int hf_usbport_keyword_power_diagnostics = -1;
 static int hf_usbport_keyword_perf_diagnostics = -1;
 static int hf_usbport_keyword_reserved1 = -1;
+static int hf_usb_msg_fragments = -1;
+static int hf_usb_msg_fragment = -1;
+static int hf_usb_msg_fragment_overlap = -1;
+static int hf_usb_msg_fragment_overlap_conflicts = -1;
+static int hf_usb_msg_fragment_multiple_tails = -1;
+static int hf_usb_msg_fragment_too_long_fragment = -1;
+static int hf_usb_msg_fragment_error = -1;
+static int hf_usb_msg_fragment_count = -1;
+static int hf_usb_msg_reassembled_in = -1;
+static int hf_usb_msg_reassembled_length = -1;
 
 static gint ett_usb_hdr = -1;
 static gint ett_usb_setup_hdr = -1;
@@ -315,6 +327,8 @@ static gint ett_usbport_endpoint = -1;
 static gint ett_usbport_endpoint_desc = -1;
 static gint ett_usbport_urb = -1;
 static gint ett_usbport_keyword = -1;
+static gint ett_usb_msg_fragment = -1;
+static gint ett_usb_msg_fragments = -1;
 
 static expert_field ei_usb_bLength_even = EI_INIT;
 static expert_field ei_usb_bLength_too_short = EI_INIT;
@@ -375,6 +389,31 @@ typedef struct _usb_alt_setting_t {
     guint8 interfaceSubclass;
     guint8 interfaceProtocol;
 } usb_alt_setting_t;
+
+static const fragment_items usb_msg_frag_items = {
+  /* Fragment subtrees */
+  &ett_usb_msg_fragment,
+  &ett_usb_msg_fragments,
+  /* Fragment fields */
+  &hf_usb_msg_fragments,
+  &hf_usb_msg_fragment,
+  &hf_usb_msg_fragment_overlap,
+  &hf_usb_msg_fragment_overlap_conflicts,
+  &hf_usb_msg_fragment_multiple_tails,
+  &hf_usb_msg_fragment_too_long_fragment,
+  &hf_usb_msg_fragment_error,
+  &hf_usb_msg_fragment_count,
+  /* Reassembled in field */
+  &hf_usb_msg_reassembled_in,
+  /* Reassembled length field */
+  &hf_usb_msg_reassembled_length,
+  /* Reassembled data field */
+  NULL,
+  /* Tag */
+  "USB Message fragments"
+};
+
+static reassembly_table usb_reassembly_table;
 
 /* http://www.usb.org/developers/docs/USB_LANGIDs.pdf */
 static const value_string usb_langid_vals[] = {
@@ -1516,8 +1555,12 @@ static int usb_addr_to_str(const address* addr, gchar *buf, int buf_len _U_)
     if(pletoh32(&addrp[0])==0xffffffff){
         g_strlcpy(buf, "host", buf_len);
     } else {
-        g_snprintf(buf, buf_len, "%d.%d.%d", pletoh16(&addrp[8]),
-                        pletoh32(&addrp[0]), pletoh32(&addrp[4]));
+        if (pletoh16(&addrp[8]) == 0)
+            g_snprintf(buf, buf_len, "%d.%d", pletoh32(&addrp[0]),
+                        pletoh32(&addrp[4]));
+        else
+            g_snprintf(buf, buf_len, "%d.%d.%d", pletoh16(&addrp[8]),
+                            pletoh32(&addrp[0]), pletoh32(&addrp[4]));
     }
 
     return (int)(strlen(buf)+1);
@@ -1631,6 +1674,7 @@ get_usb_conv_info(conversation_t *conversation)
         usb_conv_info->deviceProduct     = DEV_PRODUCT_UNKNOWN;
         usb_conv_info->alt_settings      = wmem_array_new(wmem_file_scope(), sizeof(usb_alt_setting_t));
         usb_conv_info->transactions      = wmem_tree_new(wmem_file_scope());
+        usb_conv_info->max_packet_size   = 64;
 
         conversation_add_proto_data(conversation, proto_usb, usb_conv_info);
     }
@@ -2014,6 +2058,7 @@ dissect_usb_device_descriptor(packet_info *pinfo, proto_tree *parent_tree,
     offset += 1;
 
     /* bMaxPacketSize0 */
+    usb_conv_info->max_packet_size = tvb_get_guint8(tvb, offset);
     proto_tree_add_item(tree, hf_usb_bMaxPacketSize0, tvb, offset, 1, ENC_LITTLE_ENDIAN);
     offset += 1;
 
@@ -2114,7 +2159,6 @@ dissect_usb_string_descriptor(packet_info *pinfo _U_, proto_tree *parent_tree,
     usb_trans_info_t *usb_trans_info;
 
     usb_trans_info = usb_conv_info->usb_trans_info;
-
     tree = proto_tree_add_subtree(parent_tree, tvb, offset, -1, ett_descriptor_device, &item, "STRING DESCRIPTOR");
 
     len = tvb_get_guint8(tvb, offset);
@@ -2375,6 +2419,8 @@ dissect_usb_endpoint_descriptor(packet_info *pinfo, proto_tree *parent_tree,
             address tmp_addr;
             usb_address_t *usb_addr = wmem_new0(wmem_packet_scope(), usb_address_t);
 
+            printf("dupa2\n");
+
             /* packet is sent from a USB device's endpoint 0 to the host
              * replace endpoint 0 with the endpoint of this descriptor
              * and find the corresponding conversation
@@ -2385,12 +2431,18 @@ dissect_usb_endpoint_descriptor(packet_info *pinfo, proto_tree *parent_tree,
             set_address(&tmp_addr, usb_address_type, USB_ADDR_LEN, (char *)usb_addr);
             conversation = get_usb_conversation(pinfo, &tmp_addr, &pinfo->dst, usb_addr->endpoint, pinfo->destport);
         }
-
         if (conversation) {
             usb_trans_info->interface_info->endpoint = endpoint;
+            usb_trans_info->interface_info->ep_type = ENDPOINT_TYPE(tvb_get_guint8(tvb, offset));
+            usb_trans_info->interface_info->max_packet_size = tvb_get_guint16(tvb, offset + 1, ENC_LITTLE_ENDIAN);
+            printf("DESCRIPTOR DISSECTION Endpoint: %d transfer type: %d MAX PACKET SIZE: %d\n", endpoint,
+                   usb_trans_info->interface_info->ep_type,
+                   usb_trans_info->interface_info->max_packet_size);
+
             conversation_add_proto_data(conversation, proto_usb, usb_trans_info->interface_info);
         }
     }
+
 
     /* bmAttributes */
     ep_type = ENDPOINT_TYPE(tvb_get_guint8(tvb, offset));
@@ -3552,7 +3604,9 @@ dissect_usb_setup_request(packet_info *pinfo, proto_tree *tree,
     setup_tree = proto_tree_add_subtree(parent, tvb, offset, 8, ett_usb_setup_hdr, NULL, "URB setup");
 
     req_type = USB_TYPE(tvb_get_guint8(tvb, offset));
+
     usb_trans_info->setup.requesttype = tvb_get_guint8(tvb, offset);
+
     if (usb_conv_info) {
         usb_conv_info->setup_requesttype = tvb_get_guint8(tvb, offset);
         if (req_type != RQT_SETUP_TYPE_CLASS)
@@ -3580,7 +3634,6 @@ dissect_usb_setup_request(packet_info *pinfo, proto_tree *tree,
         offset = dissect_linux_usb_pseudo_header_ext(tvb, offset, pinfo, tree);
     }
 
-
     if (tvb_captured_length_remaining(tvb, offset) > 0) {
         next_tvb = tvb_new_composite();
         tvb_composite_append(next_tvb, tvb_new_subset_length_caplen(tvb, setup_offset, 7, 7));
@@ -3600,7 +3653,6 @@ dissect_usb_setup_request(packet_info *pinfo, proto_tree *tree,
 
     /* at this point, offset contains the number of bytes that we
        dissected */
-
     if (is_usb_standard_setup_request(usb_trans_info)) {
         /* there's no point in checking the return value as there's no
            fallback for standard setup requests */
@@ -3626,7 +3678,7 @@ dissect_usb_setup_request(packet_info *pinfo, proto_tree *tree,
         }
     }
 
-    if (data_tvb)
+    if (data_tvb && header_type != USB_HEADER_LL)
         proto_tree_add_item(setup_tree, hf_usb_data_fragment, data_tvb, 0, -1, ENC_NA);
 
     return offset;
@@ -3922,6 +3974,7 @@ static usb_trans_info_t
             usb_trans_info->req_time    = pinfo->abs_ts;
             usb_trans_info->header_type = header_type;
             usb_trans_info->usb_id      = usb_id;
+            usb_trans_info->is_fragmented = FALSE;
 
             wmem_tree_insert32_array(usb_conv_info->transactions, key, usb_trans_info);
         }
@@ -3935,7 +3988,6 @@ static usb_trans_info_t
         /* this is a response */
         if (pinfo->fd->flags.visited) {
             usb_trans_info = (usb_trans_info_t *)wmem_tree_lookup32_array(usb_conv_info->transactions, key);
-
         } else {
             usb_trans_info = (usb_trans_info_t *)wmem_tree_lookup32_array_le(usb_conv_info->transactions, key);
             if (usb_trans_info) {
@@ -4694,12 +4746,130 @@ dissect_netmon_usb_port(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent, v
     return tvb_captured_length(tvb);
 }
 
+static gboolean
+usb_requires_reassembly(tvbuff_t *tvb, usb_conv_info_t *usb_conv_info)
+{
+    if (tvb_reported_length(tvb) == usb_conv_info->max_packet_size)
+        return TRUE;
+    else
+        return FALSE;
+}
+
+static tvbuff_t*
+usb_handle_fragmentation(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent,
+                         usb_conv_info_t *usb_conv_info)
+{
+    /* Nothing happens, when there is no trans_info */
+    if (!usb_conv_info->usb_trans_info)
+        return tvb;
+
+    /* If the current transfer is not fragmented and does not require
+       fragmentation, return */
+    if (!usb_conv_info->usb_trans_info->is_fragmented &&
+        !usb_requires_reassembly(tvb, usb_conv_info)) {
+        return tvb;
+    }
+
+    if (usb_conv_info->usb_trans_info->is_fragmented && pinfo->num < usb_conv_info->usb_trans_info->first_frame_num)
+        return tvb;
+
+    if (!PINFO_FD_VISITED(pinfo)) {
+        /* We're visiting the first fragment for the first time */
+        if (!usb_conv_info->usb_trans_info->is_fragmented &&
+            usb_requires_reassembly(tvb, usb_conv_info)) {
+                usb_conv_info->usb_trans_info->is_fragmented = TRUE;
+                usb_conv_info->usb_trans_info->first_frame_num = pinfo->num;
+            }
+    } else {
+        if (!usb_conv_info->usb_trans_info->is_fragmented)
+            return tvb;
+    }
+
+    gboolean more_frags = TRUE;
+
+    /* We have encountered the last fragment */
+    if (usb_conv_info->usb_trans_info->is_fragmented &&
+        !usb_requires_reassembly(tvb, usb_conv_info)) {
+            more_frags = FALSE;
+        }
+
+    fragment_head *head = fragment_add_seq_next(&usb_reassembly_table, tvb,
+                                                0, pinfo,
+                                                usb_conv_info->usb_trans_info->first_frame_num,
+                                                NULL,
+                                                tvb_reported_length(tvb),
+                                                more_frags);
+
+    tvbuff_t *new_tvb = process_reassembled_data(tvb, 0, pinfo,
+                                         "Reassembled USB", head,
+                                         &usb_msg_frag_items, NULL,
+                                         parent);
+
+    if (!more_frags) { /* Reassembled */
+        col_append_str(pinfo->cinfo, COL_INFO, "(Message reassembled) ");
+
+        return new_tvb;
+    } else if (more_frags) { /* Not last packet of reassembled message */
+        col_append_str(pinfo->cinfo, COL_INFO, "(Message fragment) ");
+
+        return NULL;
+    }
+
+    return tvb;
+}
+
+static guint8
+usb_ep_type_to_transfer(guint8 ep_type)
+{
+    switch (ep_type) {
+        case ENDPOINT_TYPE_CONTROL:
+            return URB_CONTROL;
+        case ENDPOINT_TYPE_ISOCHRONOUS:
+            return URB_ISOCHRONOUS;
+        case ENDPOINT_TYPE_BULK:
+            return URB_BULK;
+        case ENDPOINT_TYPE_INTERRUPT:
+            return URB_INTERRUPT;
+        default:
+            return URB_UNKNOWN;
+    }
+}
+
+static void
+dissect_transfer_info(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, usbll_data_t *usbll_data_ptr,
+                      usb_conv_info_t *usb_conv_info, guint8 *usbll_control_stage)
+{
+        if (usbll_data_ptr->address.endpoint == 0) {
+            usb_conv_info->transfer_type = URB_CONTROL;
+        } else {
+            usb_conv_info->transfer_type = usb_ep_type_to_transfer(usb_conv_info->ep_type);
+        }
+
+        usb_conv_info->is_setup = (usbll_data_ptr->type == SETUP);
+        usb_conv_info->is_request = (usbll_data_ptr->packet_direction == HOST_TO_DEVICE);
+
+        usb_conv_info->endpoint = usbll_data_ptr->address.endpoint;
+        usb_conv_info->direction = usbll_data_ptr->packet_direction;
+        usb_conv_info->device_address = usbll_data_ptr->address.device;
+
+
+        if (tvb_captured_length(tvb) == 0) {
+            *usbll_control_stage = USB_CONTROL_STAGE_STATUS;
+            usb_conv_info->is_request = FALSE;
+        }
+
+        proto_tree_add_uint(tree, hf_usb_linux_transfer_type, tvb, 0, 1, usb_conv_info->transfer_type);
+
+}
+
+
 void
 dissect_usb_common(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent,
                    usb_header_t header_type, void *extra_data)
 {
     gint                  offset = 0;
     int                   endpoint;
+    int                   proto_usbll;
     guint8                urb_type;
     guint32               win32_data_len = 0;
     guint32               iso_numdesc = 0;
@@ -4710,9 +4880,11 @@ dissect_usb_common(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent,
     proto_item           *item;
     usb_conv_info_t      *usb_conv_info;
     conversation_t       *conversation;
+    usbll_data_t         *usbll_data_ptr;
     guint16              device_address;
     guint16              bus_id;
     guint8                   usbpcap_control_stage = 0;
+    guint8              usbll_control_stage = 0;
     guint64                  usb_id;
     struct mausb_header  *ma_header = NULL;
     struct usbip_header  *ip_header = NULL;
@@ -4761,13 +4933,28 @@ dissect_usb_common(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent,
         location = tvb_get_letohl(tvb, 23);
         bus_id = location >> 24;
         break;
+    case USB_HEADER_LL:
+        /* get lower level dissector information */
+        usbll_data_ptr = (usbll_data_t *) p_get_proto_data(wmem_file_scope(), pinfo,
+                                                       proto_usbll,
+                                                       pinfo->num);
+        // TODO: OR with direction
+        endpoint = usbll_data_ptr->address.endpoint;
+        device_address = (guint16) usbll_data_ptr->address.device;
+        bus_id = 0;
+        urb_type = (usbll_data_ptr->packet_direction == HOST_TO_DEVICE) ? URB_SUBMIT : URB_COMPLETE;
+        break;
 
     default:
         return; /* invalid USB pseudo header */
     }
 
     col_set_str(pinfo->cinfo, COL_PROTOCOL, "USB");
-    urb_tree_ti = proto_tree_add_protocol_format(parent, proto_usb, tvb, 0, -1, "USB URB");
+    if (header_type == USB_HEADER_LL) {
+        urb_tree_ti = proto_tree_add_protocol_format(parent, proto_usb, tvb, 0, -1, "USB TRANSFER");
+    } else {
+        urb_tree_ti = proto_tree_add_protocol_format(parent, proto_usb, tvb, 0, -1, "USB URB");
+    }
     tree = proto_item_add_subtree(urb_tree_ti, ett_usb_hdr);
 
     usb_set_addr(tree, tvb, pinfo, bus_id, device_address, endpoint,
@@ -4822,13 +5009,26 @@ dissect_usb_common(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent,
         offset = dissect_darwin_buffer_packet_header(tvb, pinfo, tree, usb_conv_info, &usb_id);
         proto_item_set_len(urb_tree_ti, offset);
         break;
-
+    case USB_HEADER_LL:
+        dissect_transfer_info(tvb, pinfo, tree, usbll_data_ptr, usb_conv_info, &usbll_control_stage);
+        usb_id = 0;
+        break;
     default:
         usb_id = 0;
         break;
     }
 
     usb_conv_info->usb_trans_info = usb_get_trans_info(tvb, pinfo, tree, header_type, usb_conv_info, usb_id);
+
+    if (header_type == USB_HEADER_LL) {
+        /* returns NULL if we can't proceed */
+        tvbuff_t *new_tvb = usb_handle_fragmentation(tvb, pinfo, parent, usb_conv_info);
+        if (new_tvb == NULL)
+            return;
+        else
+            tvb = new_tvb;
+    }
+
 
     if (usb_conv_info->transfer_type != URB_CONTROL) {
         usb_tap_queue_packet(pinfo, urb_type, usb_conv_info);
@@ -4862,6 +5062,9 @@ dissect_usb_common(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent,
             break;
 
         case USB_HEADER_DARWIN:
+            break;
+
+        case USB_HEADER_LL:
             break;
         }
         break;
@@ -4904,6 +5107,9 @@ dissect_usb_common(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent,
 
                 case USB_HEADER_DARWIN:
                     break;
+
+                case USB_HEADER_LL:
+                    break;
                 }
             }
         } else {
@@ -4941,6 +5147,18 @@ dissect_usb_common(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent,
 
             case USB_HEADER_DARWIN:
                 break;
+
+            case USB_HEADER_LL:
+                if ((usb_conv_info->usb_trans_info) &&
+                    (usbll_control_stage == USB_CONTROL_STAGE_STATUS)) {
+                    col_add_fstr(pinfo->cinfo, COL_INFO, "%s Status",
+                        val_to_str_ext(usb_conv_info->usb_trans_info->setup.request,
+                            &setup_request_names_vals_ext, "Unknown type %x"));
+                    /* There is no data to dissect */
+                    return;
+                }
+
+                break;
             }
 
             offset = dissect_usb_setup_response(pinfo, tree, tvb, offset,
@@ -4973,6 +5191,9 @@ dissect_usb_common(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent,
             offset = dissect_darwin_usb_iso_transfer(pinfo, tree, header_type,
                     urb_type, tvb, offset, usb_conv_info);
             break;
+
+        case USB_HEADER_LL:
+            break;
         }
         break;
 
@@ -4998,6 +5219,9 @@ dissect_usb_common(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent,
             break;
 
         case USB_HEADER_DARWIN:
+            break;
+
+        case USB_HEADER_LL:
             break;
         }
         break;
@@ -5033,6 +5257,41 @@ static int
 dissect_darwin_usb(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent, void* data _U_)
 {
     dissect_usb_common(tvb, pinfo, parent, USB_HEADER_DARWIN, NULL);
+    return tvb_captured_length(tvb);
+}
+
+typedef enum {
+    USBT_GET_STATUS = 0,
+    USBT_CLEAR_FEATURE,
+    USBT_RESERVED2,
+    USBT_SET_FEATURE,
+    USBT_RESERVED4,
+    USBT_SET_ADDRESS,
+    USBT_GET_DESCRIPTOR,
+    USBT_SET_DESCRIPTOR,
+    USBT_GET_CONFIGURATION,
+    USBT_SET_CONFIGURATION,
+    USBT_GET_INTERFACE,
+    USBT_SET_INTERFACE,
+    USBT_SYNCH_FRAME,
+    USBT_REQUEST_UNKOWN
+} usb_request_t;
+
+typedef struct {
+    usbll_direction_t direction;
+    /* type */
+    /* recipent */
+    usb_request_t request;
+    guint16 wValue;
+    guint16 wIndex;
+    guint16 wLength;
+} control_transfer_data_t;
+
+static int
+dissect_usbll_usb(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void* data _U_)
+{
+    dissect_usb_common(tvb, pinfo, tree, USB_HEADER_LL, data);
+
     return tvb_captured_length(tvb);
 }
 
@@ -6258,6 +6517,57 @@ proto_register_usb(void)
             FT_UINT64, BASE_HEX, NULL, USBPORT_KEYWORD_RESERVED1,
             NULL, HFILL }
         },
+
+        {&hf_usb_msg_fragments,
+         { "Message fragments", "usb.msg.fragments",
+           FT_NONE, BASE_NONE, NULL, 0x00,
+           NULL, HFILL }
+        },
+        {&hf_usb_msg_fragment,
+         { "Message fragment", "usb.msg.fragment",
+           FT_FRAMENUM, BASE_NONE, NULL, 0x00,
+           NULL, HFILL }
+        },
+        {&hf_usb_msg_fragment_overlap,
+         { "Message fragment overlap", "usb.msg.fragment.overlap",
+           FT_BOOLEAN, BASE_NONE, NULL, 0x0,
+           NULL, HFILL }
+        },
+        {&hf_usb_msg_fragment_overlap_conflicts,
+         { "Message fragment overlapping with conflicting data", "usb.msg.fragment.overlap.conflicts",
+           FT_BOOLEAN, BASE_NONE, NULL, 0x0,
+           NULL, HFILL }
+        },
+        {&hf_usb_msg_fragment_multiple_tails,
+         { "Message has multiple tail fragments", "usb.msg.fragment.multiple_tails",
+           FT_BOOLEAN, BASE_NONE, NULL, 0x0,
+           NULL, HFILL }
+        },
+        {&hf_usb_msg_fragment_too_long_fragment,
+         { "Message fragment too long", "usb.msg.fragment.too_long_fragment",
+           FT_BOOLEAN, BASE_NONE, NULL, 0x0,
+           NULL, HFILL }
+        },
+        {&hf_usb_msg_fragment_error,
+         { "Message defragmentation error", "usb.msg.fragment.error",
+           FT_FRAMENUM, BASE_NONE, NULL, 0x00,
+           NULL, HFILL }
+        },
+        {&hf_usb_msg_fragment_count,
+         { "Message fragment count", "usb.msg.fragment.count",
+           FT_UINT32, BASE_DEC, NULL, 0x00,
+           NULL, HFILL }
+        },
+        {&hf_usb_msg_reassembled_in,
+        { "Reassembled in", "usb.msg.reassembled.in",
+            FT_FRAMENUM, BASE_NONE, NULL, 0x00,
+            NULL, HFILL }
+        },
+        {&hf_usb_msg_reassembled_length,
+        { "Reassembled USB length", "usb.msg.reassembled.length",
+            FT_UINT32, BASE_DEC, NULL, 0x00,
+            NULL, HFILL }
+        },
     };
 
     static gint *usb_subtrees[] = {
@@ -6277,6 +6587,8 @@ proto_register_usb(void)
         &ett_configuration_bEndpointAddress,
         &ett_endpoint_bmAttributes,
         &ett_endpoint_wMaxPacketSize,
+        &ett_usb_msg_fragment,
+        &ett_usb_msg_fragments
     };
 
     static gint *usbport_subtrees[] = {
@@ -6349,6 +6661,8 @@ proto_register_usb(void)
     usb_address_type = address_type_dissector_register("AT_USB", "USB Address", usb_addr_to_str, usb_addr_str_len, NULL, usb_col_filter_str, NULL, NULL, NULL);
 
     register_conversation_table(proto_usb, TRUE, usb_conversation_packet, usb_hostlist_packet);
+    reassembly_table_register(&usb_reassembly_table,
+                              &addresses_reassembly_table_functions);
 }
 
 void
@@ -6360,6 +6674,7 @@ proto_reg_handoff_usb(void)
     dissector_handle_t  freebsd_usb_handle;
     dissector_handle_t  darwin_usb_handle;
     dissector_handle_t  netmon_usb_port_handle;
+
     static guid_key usb_port_key = {{ 0xc88a4ef5, 0xd048, 0x4013, { 0x94, 0x08, 0xe0, 0x4b, 0x7d, 0xb2, 0x81, 0x4a }}, 0 };
 
     linux_usb_handle = create_dissector_handle(dissect_linux_usb, proto_usb);
@@ -6368,6 +6683,7 @@ proto_reg_handoff_usb(void)
     win32_usb_handle = create_dissector_handle(dissect_win32_usb, proto_usb);
     freebsd_usb_handle = create_dissector_handle(dissect_freebsd_usb, proto_usb);
     darwin_usb_handle = create_dissector_handle(dissect_darwin_usb, proto_usb);
+    register_dissector("usb", dissect_usbll_usb, proto_usb);
 
     dissector_add_uint("wtap_encap", WTAP_ENCAP_USB_LINUX, linux_usb_handle);
     dissector_add_uint("wtap_encap", WTAP_ENCAP_USB_LINUX_MMAPPED, linux_usb_mmapped_handle);

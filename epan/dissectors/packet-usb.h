@@ -36,7 +36,8 @@ typedef enum {
     USB_HEADER_USBPCAP,
     USB_HEADER_MAUSB,
     USB_HEADER_USBIP,
-    USB_HEADER_DARWIN
+    USB_HEADER_DARWIN,
+    USB_HEADER_LL
 } usb_header_t;
 
 #define USB_HEADER_IS_LINUX(type) \
@@ -46,6 +47,10 @@ typedef enum {
 typedef struct _usb_trans_info_t {
     guint32 request_in;
     guint32 response_in;
+
+    gboolean is_fragmented;
+    guint32 first_frame_num;
+
     nstime_t req_time;
     usb_header_t header_type;
 
@@ -89,9 +94,13 @@ struct _usb_conv_info_t {
     guint8   endpoint;
     gint     direction;
     guint8   transfer_type;
+    guint8   ep_type;
     guint32  device_protocol;
     gboolean is_request;
     gboolean is_setup;
+
+    guint32 max_packet_size;
+
     guint8   setup_requesttype;
 
     guint16 interfaceClass;     /* Interface Descriptor - class          */
