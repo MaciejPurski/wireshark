@@ -1557,7 +1557,7 @@ static int usb_addr_to_str(const address* addr, gchar *buf, int buf_len _U_)
     } else {
         if (pletoh16(&addrp[8]) == 0)
             g_snprintf(buf, buf_len, "%d.%d", pletoh32(&addrp[0]),
-                        pletoh32(&addrp[4]) & 0x7f);
+                        pletoh32(&addrp[4]));
         else
             g_snprintf(buf, buf_len, "%d.%d.%d", pletoh16(&addrp[8]),
                             pletoh32(&addrp[0]), pletoh32(&addrp[4]));
@@ -1720,6 +1720,10 @@ get_usb_conversation(packet_info *pinfo,
                      guint32 src_endpoint, guint32 dst_endpoint)
 {
     conversation_t *conversation;
+
+    if (pinfo->destport == NO_ENDPOINT && src_endpoint != 0) {
+        src_endpoint |= 0x80;
+    }
 
     /*
      * Do we have a conversation for this connection?
@@ -2432,7 +2436,9 @@ dissect_usb_endpoint_descriptor(packet_info *pinfo, proto_tree *parent_tree,
     dissect_usb_descriptor_header(tree, tvb, offset, NULL);
     offset += 2;
 
-    /* TODO: endpoint & with dir */
+    /* Get endpoint together with its direction in order to differentiate conversations
+     * with IN and OUT endpoints with the same index
+     */
     endpoint = tvb_get_guint8(tvb, offset);
     dissect_usb_endpoint_address(tree, tvb, offset);
     offset += 1;
@@ -2458,21 +2464,21 @@ dissect_usb_endpoint_descriptor(packet_info *pinfo, proto_tree *parent_tree,
              */
             usb_addr->bus_id = ((const usb_address_t *)(pinfo->src.data))->bus_id;
             usb_addr->device = ((const usb_address_t *)(pinfo->src.data))->device;
-            usb_addr->endpoint = GUINT32_TO_LE(endpoint);
+            usb_addr->endpoint = GUINT32_TO_LE(endpoint) & 0x7F;
             set_address(&tmp_addr, usb_address_type, USB_ADDR_LEN, (char *)usb_addr);
-            conversation = get_usb_conversation(pinfo, &tmp_addr, &pinfo->dst, usb_addr->endpoint, pinfo->destport);
+            /* IN endpoint */
+            if (GUINT32_TO_LE(endpoint) & 0x80)
+                conversation = get_usb_conversation(pinfo, &tmp_addr, &pinfo->dst, usb_addr->endpoint, pinfo->destport);
+            else
+                conversation = get_usb_conversation(pinfo,  &pinfo->dst, &tmp_addr, pinfo->destport, usb_addr->endpoint);
         }
         if (conversation) {
-            usb_trans_info->interface_info->endpoint = endpoint;
+            usb_trans_info->interface_info->endpoint = endpoint & 0x7F;
             usb_endpoint_info_t *endpoint_desc = wmem_new(wmem_file_scope(), usb_endpoint_info_t);
             endpoint_desc->index = endpoint;
             endpoint_desc->type = ENDPOINT_TYPE(tvb_get_guint8(tvb, offset));
             endpoint_desc->max_packet_size = tvb_get_guint16(tvb, offset + 1, ENC_LITTLE_ENDIAN);
             wmem_array_append(usb_trans_info->interface_info->endpoints, endpoint_desc, 1);
-            // usb_trans_info->interface_info->ep_type = ENDPOINT_TYPE(tvb_get_guint8(tvb, offset));
-            // printf("DESCRIPTOR DISSECTION Endpoint: %d transfer type: %d MAX PACKET SIZE: %d\n", endpoint,
-            //        usb_trans_info->interface_info->ep_type,
-            //        usb_trans_info->interface_info->max_packet_size);
 
             conversation_add_proto_data(conversation, proto_usb, usb_trans_info->interface_info);
         }
@@ -4880,14 +4886,14 @@ dissect_transfer_info(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, usbll
         } else {
             guint32 i, count = wmem_array_get_count(usb_conv_info->endpoints);
 
-            usb_conv_info->endpoint = usbll_data_ptr->address.endpoint |
-                                      (usbll_data_ptr->packet_direction << 7);
+            usb_conv_info->endpoint = usbll_data_ptr->address.endpoint;
             usb_conv_info->transfer_type = URB_UNKNOWN;
 
             for (i = 0; i < count; i++) {
                 usb_endpoint_info_t *endpoint = (usb_endpoint_info_t *)wmem_array_index(usb_conv_info->endpoints, i);
 
-                if (endpoint->index == usb_conv_info->endpoint) {
+                if (endpoint->index == (usb_conv_info->endpoint |
+                                      (usbll_data_ptr->packet_direction << 7))) {
                     usb_conv_info->transfer_type = usb_ep_type_to_transfer(endpoint->type);
                     usb_conv_info->max_packet_size = endpoint->max_packet_size;
 
@@ -4986,18 +4992,12 @@ dissect_usb_common(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent,
         break;
     case USB_HEADER_LL:
         /* get lower level dissector information */
-        usbll_data_ptr = (usbll_data_t *) p_get_proto_data(wmem_file_scope(), pinfo,
-                                                       proto_usbll,
-                                                       pinfo->num);
-        // TODO: do the same with other dissectors
-        if (usbll_data_ptr->address.endpoint == 0)
-            endpoint = usbll_data_ptr->address.endpoint;
-        else
-            endpoint = usbll_data_ptr->address.endpoint | (usbll_data_ptr->packet_direction << 7);
+        usbll_data_ptr = (usbll_data_t *) extra_data;
 
+        urb_type = (usbll_data_ptr->packet_direction == HOST_TO_DEVICE) ? URB_SUBMIT : URB_COMPLETE;
+        endpoint = usbll_data_ptr->address.endpoint;
         device_address = (guint16) usbll_data_ptr->address.device;
         bus_id = 0;
-        urb_type = (usbll_data_ptr->packet_direction == HOST_TO_DEVICE) ? URB_SUBMIT : URB_COMPLETE;
         break;
 
     default:
