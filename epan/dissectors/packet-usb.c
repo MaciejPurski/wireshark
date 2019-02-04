@@ -2173,7 +2173,6 @@ dissect_usb_string_descriptor(packet_info *pinfo _U_, proto_tree *parent_tree,
         usb_string_desc_req_t *string_desc = (usb_string_desc_req_t *) wmem_array_index(usb_conv_info->string_desc_reqs,
                                                                           i);
 
-        guint8 index = string_desc->index;
         if (string_desc->index == usb_trans_info->u.get_descriptor.usb_index) {
             interface_conv_info = string_desc->interface_conv;
             break;
@@ -4877,7 +4876,7 @@ usb_ep_type_to_transfer(guint8 ep_type)
 }
 
 static void
-dissect_transfer_info(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, usbll_data_t *usbll_data_ptr,
+dissect_transfer_info(tvbuff_t *tvb, proto_tree *tree, usbll_data_t *usbll_data_ptr,
                       usb_conv_info_t *usb_conv_info, guint8 *usbll_control_stage)
 {
         if (usbll_data_ptr->address.endpoint == 0) {
@@ -4926,7 +4925,6 @@ dissect_usb_common(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent,
 {
     gint                  offset = 0;
     int                   endpoint;
-    int                   proto_usbll;
     guint8                urb_type;
     guint32               win32_data_len = 0;
     guint32               iso_numdesc = 0;
@@ -5064,7 +5062,7 @@ dissect_usb_common(tvbuff_t *tvb, packet_info *pinfo, proto_tree *parent,
         proto_item_set_len(urb_tree_ti, offset);
         break;
     case USB_HEADER_LL:
-        dissect_transfer_info(tvb, pinfo, tree, usbll_data_ptr, usb_conv_info, &usbll_control_stage);
+        dissect_transfer_info(tvb, tree, usbll_data_ptr, usb_conv_info, &usbll_control_stage);
         usb_id = 0;
         break;
     default:
